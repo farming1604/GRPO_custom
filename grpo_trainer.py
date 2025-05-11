@@ -53,7 +53,7 @@ class GRPOTrainer:
 
         self.step = 0
         self._metrics = defaultdict(list)
-        self.scaler = torch.cuda.amp.GradScaler() if config.device.startswith("cuda") else None
+        self.scaler = torch.amp.GradScaler() if config.device.startswith("cuda") else None
 
     def get_per_token_logps(self, model, full_ids, attention_mask, num_logits_to_keep):
         outputs = model(input_ids=full_ids, attention_mask=attention_mask)
