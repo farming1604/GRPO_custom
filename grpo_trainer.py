@@ -56,21 +56,26 @@ class GRPOTrainer:
         self.scaler = torch.amp.GradScaler() if config.device.startswith("cuda") else None
 
     def get_per_token_logps(self, model, full_ids, attention_mask, num_logits_to_keep):
+        print("Model training mode:", model.training)
         outputs = model(input_ids=full_ids, attention_mask=attention_mask)
-        logits = outputs.logits[:, :-1, :]  # Exclude the last logit
+        print("Outputs logits grad_fn:", outputs.logits.grad_fn)
+        logits = outputs.logits[:, :-1, :]
         logits_slice = logits[:, -num_logits_to_keep:, :]
         token_ids = full_ids[:, -num_logits_to_keep:]
         log_probs = torch.log_softmax(logits_slice, dim=-1)
         token_log_probs = log_probs.gather(dim=-1, index=token_ids.unsqueeze(-1)).squeeze(-1)
+        print("token_log_probs grad_fn:", token_log_probs.grad_fn)
         return token_log_probs
 
     def compute_loss(self, input_ids, generation_output, advantages, old_logps, attention_mask):
         num_logits_to_keep = generation_output.shape[1] - input_ids.shape[1]
         full_ids = generation_output
-
-        # Compute current log probabilities from the updated model
+        print("full_ids shape:", full_ids.shape)
+        print("full_ids device:", full_ids.device)
+        print("attention_mask shape:", attention_mask.shape)
+        print("attention_mask device:", attention_mask.device)
         per_token_logps = self.get_per_token_logps(self.model, full_ids, attention_mask, num_logits_to_keep)
-        print("per_token_logps grad_fn:", per_token_logps.grad_fn)  # Phải không phải None
+        print("per_token_logps grad_fn:", per_token_logps.grad_fn)
         with torch.no_grad():
             ref_per_token_logps = self.get_per_token_logps(self.ref_model, full_ids, attention_mask, num_logits_to_keep)
         # KL divergence per token
@@ -100,7 +105,7 @@ class GRPOTrainer:
         per_token_loss = surrogate_loss + self.config.beta * per_token_kl
         print("per_token_loss requires_grad:", per_token_loss.requires_grad)  # Phải là True
         loss = ((per_token_loss * mask).sum(dim=1) / (mask.sum(dim=1) + 1e-8)).mean()
-        print("loss grad_fn:", loss.grad_fn)  # Phải không phải None
+        print("loss grad_fn:", loss.grad_fn)
 
         mean_kl = (per_token_kl * mask).sum(dim=1).mean().item()
         completion_length = mask.sum(dim=1).mean().item()
