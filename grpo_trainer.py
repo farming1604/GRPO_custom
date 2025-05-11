@@ -70,10 +70,12 @@ class GRPOTrainer:
 
         # Compute current log probabilities from the updated model
         per_token_logps = self.get_per_token_logps(self.model, full_ids, attention_mask, num_logits_to_keep)
+        print("per_token_logps grad_fn:", per_token_logps.grad_fn)  # Phải không phải None
         with torch.no_grad():
             ref_per_token_logps = self.get_per_token_logps(self.ref_model, full_ids, attention_mask, num_logits_to_keep)
-        # KL divergence per token (using Schulman et al.'s approximation)
+        # KL divergence per token
         per_token_kl = torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
+        print("per_token_kl requires_grad:", per_token_kl.requires_grad)  # Phải là True
 
         # Compute mask for valid tokens via EOS detection
         completion_ids = full_ids[:, input_ids.shape[1]:]
@@ -93,9 +95,12 @@ class GRPOTrainer:
         clipped_ratio = torch.clamp(ratio, 1 - self.config.clip_epsilon, 1 + self.config.clip_epsilon)
         # Clipped surrogate objective
         surrogate_loss = -torch.min(ratio * advantages.unsqueeze(1), clipped_ratio * advantages.unsqueeze(1))
+        print("surrogate_loss requires_grad:", surrogate_loss.requires_grad)  # Phải là True
         # Add KL penalty term
         per_token_loss = surrogate_loss + self.config.beta * per_token_kl
+        print("per_token_loss requires_grad:", per_token_loss.requires_grad)  # Phải là True
         loss = ((per_token_loss * mask).sum(dim=1) / (mask.sum(dim=1) + 1e-8)).mean()
+        print("loss grad_fn:", loss.grad_fn)  # Phải không phải None
 
         mean_kl = (per_token_kl * mask).sum(dim=1).mean().item()
         completion_length = mask.sum(dim=1).mean().item()
