@@ -24,14 +24,7 @@ from .reward_functions import (
 # GRPO Trainer
 
 class GRPOTrainer:
-    def __init__(
-        self,
-        model: AutoModelForCausalLM,
-        tokenizer: AutoTokenizer,
-        reward_funcs: list,
-        config: GRPOConfig,
-        train_dataset: Dataset,
-    ):
+    def __init__(self, model, tokenizer, reward_funcs, config, train_dataset):
         self.dataloader = DataLoader(train_dataset, batch_size=config.per_device_train_batch_size, shuffle=True, collate_fn=lambda x: x)
         self.model = model.to(config.device)
         self.tokenizer = tokenizer
@@ -53,34 +46,27 @@ class GRPOTrainer:
 
         self.step = 0
         self._metrics = defaultdict(list)
-        self.scaler = torch.amp.GradScaler() if config.device.startswith("cuda") else None
+        self.scaler = torch.cuda.amp.GradScaler() if config.device.startswith("cuda") else None
 
     def get_per_token_logps(self, model, full_ids, attention_mask, num_logits_to_keep):
-        print("Model training mode:", model.training)
         outputs = model(input_ids=full_ids, attention_mask=attention_mask)
-        print("Outputs logits grad_fn:", outputs.logits.grad_fn)
-        logits = outputs.logits[:, :-1, :]
+        logits = outputs.logits[:, :-1, :]  # Exclude the last logit
         logits_slice = logits[:, -num_logits_to_keep:, :]
         token_ids = full_ids[:, -num_logits_to_keep:]
         log_probs = torch.log_softmax(logits_slice, dim=-1)
         token_log_probs = log_probs.gather(dim=-1, index=token_ids.unsqueeze(-1)).squeeze(-1)
-        print("token_log_probs grad_fn:", token_log_probs.grad_fn)
         return token_log_probs
 
     def compute_loss(self, input_ids, generation_output, advantages, old_logps, attention_mask):
         num_logits_to_keep = generation_output.shape[1] - input_ids.shape[1]
         full_ids = generation_output
-        print("full_ids shape:", full_ids.shape)
-        print("full_ids device:", full_ids.device)
-        print("attention_mask shape:", attention_mask.shape)
-        print("attention_mask device:", attention_mask.device)
+
+        # Compute current log probabilities from the updated model
         per_token_logps = self.get_per_token_logps(self.model, full_ids, attention_mask, num_logits_to_keep)
-        print("per_token_logps grad_fn:", per_token_logps.grad_fn)
         with torch.no_grad():
             ref_per_token_logps = self.get_per_token_logps(self.ref_model, full_ids, attention_mask, num_logits_to_keep)
-        # KL divergence per token
+        # KL divergence per token (using Schulman et al.'s approximation)
         per_token_kl = torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
-        print("per_token_kl requires_grad:", per_token_kl.requires_grad)  # Phải là True
 
         # Compute mask for valid tokens via EOS detection
         completion_ids = full_ids[:, input_ids.shape[1]:]
@@ -100,12 +86,9 @@ class GRPOTrainer:
         clipped_ratio = torch.clamp(ratio, 1 - self.config.clip_epsilon, 1 + self.config.clip_epsilon)
         # Clipped surrogate objective
         surrogate_loss = -torch.min(ratio * advantages.unsqueeze(1), clipped_ratio * advantages.unsqueeze(1))
-        print("surrogate_loss requires_grad:", surrogate_loss.requires_grad)  # Phải là True
         # Add KL penalty term
         per_token_loss = surrogate_loss + self.config.beta * per_token_kl
-        print("per_token_loss requires_grad:", per_token_loss.requires_grad)  # Phải là True
         loss = ((per_token_loss * mask).sum(dim=1) / (mask.sum(dim=1) + 1e-8)).mean()
-        print("loss grad_fn:", loss.grad_fn)
 
         mean_kl = (per_token_kl * mask).sum(dim=1).mean().item()
         completion_length = mask.sum(dim=1).mean().item()
